@@ -1,3 +1,7 @@
+#define STRLEN(s) (sizeof(s)/sizeof(s[0]))
+
+unsigned long *resolve_sym(unsigned char *symbol);
+
 unsigned long *
 get_syscall_table_bf(void);
 

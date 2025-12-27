@@ -1,6 +1,9 @@
 Diamorphine
 ===========
 
+**THIS IS A PATCHED VERSION BECAUSE I NEEDED [FLIPSWITCH](https://github.com/1337-42/FlipSwitch-dev/tree/main) INTEGRATED FOR DETECTION RESEARCH**
+**CODE WAS DIRECTLY COPIED WITH MINOR MODIFICATIONS FROM THEIR REPO**
+
 Diamorphine is a LKM rootkit for Linux Kernels 2.6.x/3.x/4.x/5.x/6.x (x86/x86_64 and ARM64)
 
 Features

